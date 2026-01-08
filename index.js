@@ -78,6 +78,31 @@ client.on('interactionCreate', async interaction => {
                 });
             }
 
+            // Check bot's permissions in this specific channel
+            const botMember = interaction.guild.members.cache.get(client.user.id);
+            const permissions = channel.permissionsFor(botMember);
+
+            if (!permissions) {
+                return interaction.reply({
+                    content: `Cannot check permissions for ${channelOption}. The bot may not have access to view this channel.`,
+                    ephemeral: true
+                });
+            }
+
+            if (!permissions.has('ViewChannel')) {
+                return interaction.reply({
+                    content: `Bot cannot view ${channelOption}. Add the bot's role to this channel's permissions.`,
+                    ephemeral: true
+                });
+            }
+
+            if (!permissions.has('SendMessages')) {
+                return interaction.reply({
+                    content: `Bot cannot send messages in ${channelOption}. Add "Send Messages" permission for the bot's role in this channel.`,
+                    ephemeral: true
+                });
+            }
+
             await channel.send(message);
             await interaction.reply({
                 content: `Message sent to ${channelOption}`,
