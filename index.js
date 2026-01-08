@@ -65,7 +65,8 @@ client.on('interactionCreate', async interaction => {
         }
 
         const channelOption = interaction.options.getChannel('channel');
-        const message = interaction.options.getString('message');
+        // Convert \n to actual line breaks for formatting
+        const message = interaction.options.getString('message').replace(/\\n/g, '\n');
 
         try {
             // Fetch the full channel object to ensure we have send permissions
