@@ -11,7 +11,7 @@ const client = new Client({
 // Register slash commands
 const commands = [
     new SlashCommandBuilder()
-        .setName('reply')
+        .setName('say')
         .setDescription('Send a message to a channel as the bot (Staff only)')
         .addChannelOption(option =>
             option.setName('channel')
@@ -55,7 +55,7 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    if (interaction.commandName === 'reply') {
+    if (interaction.commandName === 'say') {
         // Check if user has an allowed role
         if (!hasAllowedRole(interaction.member)) {
             return interaction.reply({
