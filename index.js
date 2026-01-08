@@ -4,9 +4,8 @@ require('dotenv').config();
 // Allowed role IDs - users must have at least one of these roles to use the command
 const ALLOWED_ROLE_IDS = process.env.ALLOWED_ROLE_IDS?.split(',').map(id => id.trim()) || [];
 
-// Store pending interactions (channel selection before modal)
+// Store pending announcements (channel selection before modal)
 const pendingAnnouncements = new Map();
-const pendingMessages = new Map();
 
 const client = new Client({
     intents: [GatewayIntentBits.Guilds]
@@ -21,6 +20,10 @@ const commands = [
             option.setName('channel')
                 .setDescription('The channel to send the message to')
                 .addChannelTypes(ChannelType.GuildText)
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('message')
+                .setDescription('The message to send (use \\n for line breaks)')
                 .setRequired(true))
         .toJSON(),
     new SlashCommandBuilder()
@@ -98,33 +101,40 @@ client.on('interactionCreate', async interaction => {
             }
 
             const channelOption = interaction.options.getChannel('channel');
+            const message = interaction.options.getString('message').replace(/\\n/g, '\n');
 
-            // Store the channel for when the modal is submitted
-            pendingMessages.set(interaction.user.id, {
-                channelId: channelOption.id,
-                guildId: interaction.guild.id,
-                timestamp: Date.now()
-            });
+            try {
+                const channel = await client.channels.fetch(channelOption.id);
 
-            // Create the modal
-            const modal = new ModalBuilder()
-                .setCustomId('say_modal')
-                .setTitle('Send Message');
+                if (!channel || !channel.isTextBased()) {
+                    return interaction.reply({
+                        content: 'Invalid channel or channel is not a text channel.',
+                        ephemeral: true
+                    });
+                }
 
-            // Message input (paragraph for multi-line)
-            const messageInput = new TextInputBuilder()
-                .setCustomId('message')
-                .setLabel('Message')
-                .setStyle(TextInputStyle.Paragraph)
-                .setPlaceholder('Type your message here... You can use @mentions, #channels, etc.')
-                .setRequired(true)
-                .setMaxLength(2000);
+                const botMember = interaction.guild.members.cache.get(client.user.id);
+                const permissions = channel.permissionsFor(botMember);
 
-            modal.addComponents(
-                new ActionRowBuilder().addComponents(messageInput)
-            );
+                if (!permissions || !permissions.has('ViewChannel') || !permissions.has('SendMessages')) {
+                    return interaction.reply({
+                        content: `Bot lacks permissions in ${channelOption}.`,
+                        ephemeral: true
+                    });
+                }
 
-            await interaction.showModal(modal);
+                await channel.send(message);
+                await interaction.reply({
+                    content: `Message sent to ${channelOption}`,
+                    ephemeral: true
+                });
+            } catch (error) {
+                console.error('Error sending message:', error.message);
+                await interaction.reply({
+                    content: `Failed to send message: ${error.message}`,
+                    ephemeral: true
+                });
+            }
         }
 
         if (interaction.commandName === 'announce') {
@@ -208,45 +218,6 @@ client.on('interactionCreate', async interaction => {
 
     // Handle modal submissions
     if (interaction.isModalSubmit()) {
-        if (interaction.customId === 'say_modal') {
-            const pending = pendingMessages.get(interaction.user.id);
-
-            if (!pending) {
-                return interaction.reply({
-                    content: 'Session expired. Please use /say again.',
-                    ephemeral: true
-                });
-            }
-
-            // Clean up
-            pendingMessages.delete(interaction.user.id);
-
-            const message = interaction.fields.getTextInputValue('message');
-
-            try {
-                const channel = await client.channels.fetch(pending.channelId);
-
-                if (!channel || !channel.isTextBased()) {
-                    return interaction.reply({
-                        content: 'Target channel is no longer valid.',
-                        ephemeral: true
-                    });
-                }
-
-                await channel.send(message);
-                await interaction.reply({
-                    content: `Message sent to <#${pending.channelId}>`,
-                    ephemeral: true
-                });
-            } catch (error) {
-                console.error('Error sending message:', error.message);
-                await interaction.reply({
-                    content: `Failed to send message: ${error.message}`,
-                    ephemeral: true
-                });
-            }
-        }
-
         if (interaction.customId === 'announcement_modal') {
             const pending = pendingAnnouncements.get(interaction.user.id);
 
@@ -306,17 +277,12 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-// Clean up old pending data every 5 minutes
+// Clean up old pending announcements every 5 minutes
 setInterval(() => {
     const now = Date.now();
     for (const [userId, data] of pendingAnnouncements) {
         if (now - data.timestamp > 300000) { // 5 minutes
             pendingAnnouncements.delete(userId);
-        }
-    }
-    for (const [userId, data] of pendingMessages) {
-        if (now - data.timestamp > 300000) { // 5 minutes
-            pendingMessages.delete(userId);
         }
     }
 }, 300000);
