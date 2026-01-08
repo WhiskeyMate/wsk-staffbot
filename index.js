@@ -64,19 +64,30 @@ client.on('interactionCreate', async interaction => {
             });
         }
 
-        const channel = interaction.options.getChannel('channel');
+        const channelOption = interaction.options.getChannel('channel');
         const message = interaction.options.getString('message');
 
         try {
+            // Fetch the full channel object to ensure we have send permissions
+            const channel = await client.channels.fetch(channelOption.id);
+
+            if (!channel || !channel.isTextBased()) {
+                return interaction.reply({
+                    content: 'Invalid channel or channel is not a text channel.',
+                    ephemeral: true
+                });
+            }
+
             await channel.send(message);
             await interaction.reply({
-                content: `Message sent to ${channel}`,
+                content: `Message sent to ${channelOption}`,
                 ephemeral: true
             });
         } catch (error) {
-            console.error('Error sending message:', error);
+            console.error('Error sending message:', error.message);
+            console.error('Full error:', error);
             await interaction.reply({
-                content: `Failed to send message. Make sure I have permission to send messages in ${channel}.`,
+                content: `Failed to send message: ${error.message}`,
                 ephemeral: true
             });
         }
