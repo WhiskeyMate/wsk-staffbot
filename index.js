@@ -1,8 +1,11 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ChannelType, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ChannelType, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
 require('dotenv').config();
 
 // Allowed role IDs - users must have at least one of these roles to use the command
 const ALLOWED_ROLE_IDS = process.env.ALLOWED_ROLE_IDS?.split(',').map(id => id.trim()) || [];
+
+// Store pending announcements (channel selection before modal)
+const pendingAnnouncements = new Map();
 
 const client = new Client({
     intents: [GatewayIntentBits.Guilds]
@@ -25,40 +28,12 @@ const commands = [
         .toJSON(),
     new SlashCommandBuilder()
         .setName('announce')
-        .setDescription('Send a rich embed announcement (Staff only)')
+        .setDescription('Send a rich embed announcement with a form (Staff only)')
         .addChannelOption(option =>
             option.setName('channel')
                 .setDescription('The channel to send the announcement to')
                 .addChannelTypes(ChannelType.GuildText)
                 .setRequired(true))
-        .addStringOption(option =>
-            option.setName('title')
-                .setDescription('Announcement title')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('description')
-                .setDescription('Announcement description (use \\n for line breaks)')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('color')
-                .setDescription('Embed color (hex like #FF0000 or name like Red)')
-                .setRequired(false))
-        .addStringOption(option =>
-            option.setName('image')
-                .setDescription('Main image URL')
-                .setRequired(false))
-        .addStringOption(option =>
-            option.setName('thumbnail')
-                .setDescription('Small thumbnail URL (top right)')
-                .setRequired(false))
-        .addStringOption(option =>
-            option.setName('footer')
-                .setDescription('Footer text')
-                .setRequired(false))
-        .addStringOption(option =>
-            option.setName('message')
-                .setDescription('Plain text message above the embed (e.g., @everyone)')
-                .setRequired(false))
         .toJSON()
 ];
 
@@ -71,10 +46,35 @@ function hasAllowedRole(member) {
     return member.roles.cache.some(role => ALLOWED_ROLE_IDS.includes(role.id));
 }
 
+// Parse color string to hex
+function parseColor(color) {
+    if (!color) return 0x5865F2;
+
+    const colorMap = {
+        'red': 0xFF0000,
+        'green': 0x00FF00,
+        'blue': 0x0000FF,
+        'yellow': 0xFFFF00,
+        'orange': 0xFFA500,
+        'purple': 0x800080,
+        'pink': 0xFFC0CB,
+        'gold': 0xFFD700,
+        'white': 0xFFFFFF,
+        'black': 0x000000
+    };
+
+    const colorLower = color.toLowerCase().trim();
+    if (colorMap[colorLower]) {
+        return colorMap[colorLower];
+    } else if (color.startsWith('#')) {
+        return parseInt(color.slice(1), 16);
+    }
+    return 0x5865F2;
+}
+
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
 
-    // Register commands globally (or use guildId for faster testing)
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
 
     try {
@@ -90,166 +90,201 @@ client.once('ready', async () => {
 });
 
 client.on('interactionCreate', async interaction => {
-    if (!interaction.isChatInputCommand()) return;
+    // Handle slash commands
+    if (interaction.isChatInputCommand()) {
+        if (interaction.commandName === 'say') {
+            if (!hasAllowedRole(interaction.member)) {
+                return interaction.reply({
+                    content: 'You do not have permission to use this command.',
+                    ephemeral: true
+                });
+            }
 
-    if (interaction.commandName === 'say') {
-        // Check if user has an allowed role
-        if (!hasAllowedRole(interaction.member)) {
-            return interaction.reply({
-                content: 'You do not have permission to use this command.',
-                ephemeral: true
-            });
+            const channelOption = interaction.options.getChannel('channel');
+            const message = interaction.options.getString('message').replace(/\\n/g, '\n');
+
+            try {
+                const channel = await client.channels.fetch(channelOption.id);
+
+                if (!channel || !channel.isTextBased()) {
+                    return interaction.reply({
+                        content: 'Invalid channel or channel is not a text channel.',
+                        ephemeral: true
+                    });
+                }
+
+                const botMember = interaction.guild.members.cache.get(client.user.id);
+                const permissions = channel.permissionsFor(botMember);
+
+                if (!permissions || !permissions.has('ViewChannel') || !permissions.has('SendMessages')) {
+                    return interaction.reply({
+                        content: `Bot lacks permissions in ${channelOption}.`,
+                        ephemeral: true
+                    });
+                }
+
+                await channel.send(message);
+                await interaction.reply({
+                    content: `Message sent to ${channelOption}`,
+                    ephemeral: true
+                });
+            } catch (error) {
+                console.error('Error sending message:', error.message);
+                await interaction.reply({
+                    content: `Failed to send message: ${error.message}`,
+                    ephemeral: true
+                });
+            }
         }
 
-        const channelOption = interaction.options.getChannel('channel');
-        // Convert \n to actual line breaks for formatting
-        const message = interaction.options.getString('message').replace(/\\n/g, '\n');
-
-        try {
-            // Fetch the full channel object to ensure we have send permissions
-            const channel = await client.channels.fetch(channelOption.id);
-
-            if (!channel || !channel.isTextBased()) {
+        if (interaction.commandName === 'announce') {
+            if (!hasAllowedRole(interaction.member)) {
                 return interaction.reply({
-                    content: 'Invalid channel or channel is not a text channel.',
+                    content: 'You do not have permission to use this command.',
                     ephemeral: true
                 });
             }
 
-            // Check bot's permissions in this specific channel
-            const botMember = interaction.guild.members.cache.get(client.user.id);
-            const permissions = channel.permissionsFor(botMember);
+            const channelOption = interaction.options.getChannel('channel');
 
-            if (!permissions) {
-                return interaction.reply({
-                    content: `Cannot check permissions for ${channelOption}. The bot may not have access to view this channel.`,
-                    ephemeral: true
-                });
-            }
-
-            if (!permissions.has('ViewChannel')) {
-                return interaction.reply({
-                    content: `Bot cannot view ${channelOption}. Add the bot's role to this channel's permissions.`,
-                    ephemeral: true
-                });
-            }
-
-            if (!permissions.has('SendMessages')) {
-                return interaction.reply({
-                    content: `Bot cannot send messages in ${channelOption}. Add "Send Messages" permission for the bot's role in this channel.`,
-                    ephemeral: true
-                });
-            }
-
-            await channel.send(message);
-            await interaction.reply({
-                content: `Message sent to ${channelOption}`,
-                ephemeral: true
+            // Store the channel for when the modal is submitted
+            pendingAnnouncements.set(interaction.user.id, {
+                channelId: channelOption.id,
+                guildId: interaction.guild.id,
+                timestamp: Date.now()
             });
-        } catch (error) {
-            console.error('Error sending message:', error.message);
-            console.error('Full error:', error);
-            await interaction.reply({
-                content: `Failed to send message: ${error.message}`,
-                ephemeral: true
-            });
+
+            // Create the modal
+            const modal = new ModalBuilder()
+                .setCustomId('announcement_modal')
+                .setTitle('Create Announcement');
+
+            // Title input
+            const titleInput = new TextInputBuilder()
+                .setCustomId('title')
+                .setLabel('Title')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('Announcement title')
+                .setRequired(true)
+                .setMaxLength(256);
+
+            // Description input (paragraph for multi-line)
+            const descriptionInput = new TextInputBuilder()
+                .setCustomId('description')
+                .setLabel('Description')
+                .setStyle(TextInputStyle.Paragraph)
+                .setPlaceholder('Main announcement content...')
+                .setRequired(true)
+                .setMaxLength(4000);
+
+            // Color input
+            const colorInput = new TextInputBuilder()
+                .setCustomId('color')
+                .setLabel('Color (optional)')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('#FF0000 or red, blue, gold, etc.')
+                .setRequired(false)
+                .setMaxLength(20);
+
+            // Image URL input
+            const imageInput = new TextInputBuilder()
+                .setCustomId('image')
+                .setLabel('Image URL (optional)')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('https://example.com/image.png')
+                .setRequired(false);
+
+            // Footer input
+            const footerInput = new TextInputBuilder()
+                .setCustomId('footer')
+                .setLabel('Footer text (optional)')
+                .setStyle(TextInputStyle.Short)
+                .setPlaceholder('Footer text')
+                .setRequired(false)
+                .setMaxLength(2048);
+
+            // Add inputs to action rows (each input needs its own row)
+            modal.addComponents(
+                new ActionRowBuilder().addComponents(titleInput),
+                new ActionRowBuilder().addComponents(descriptionInput),
+                new ActionRowBuilder().addComponents(colorInput),
+                new ActionRowBuilder().addComponents(imageInput),
+                new ActionRowBuilder().addComponents(footerInput)
+            );
+
+            await interaction.showModal(modal);
         }
     }
 
-    if (interaction.commandName === 'announce') {
-        // Check if user has an allowed role
-        if (!hasAllowedRole(interaction.member)) {
-            return interaction.reply({
-                content: 'You do not have permission to use this command.',
-                ephemeral: true
-            });
-        }
+    // Handle modal submissions
+    if (interaction.isModalSubmit()) {
+        if (interaction.customId === 'announcement_modal') {
+            const pending = pendingAnnouncements.get(interaction.user.id);
 
-        const channelOption = interaction.options.getChannel('channel');
-        const title = interaction.options.getString('title');
-        const description = interaction.options.getString('description').replace(/\\n/g, '\n');
-        const color = interaction.options.getString('color');
-        const image = interaction.options.getString('image');
-        const thumbnail = interaction.options.getString('thumbnail');
-        const footer = interaction.options.getString('footer');
-        const plainMessage = interaction.options.getString('message');
-
-        try {
-            const channel = await client.channels.fetch(channelOption.id);
-
-            if (!channel || !channel.isTextBased()) {
+            if (!pending) {
                 return interaction.reply({
-                    content: 'Invalid channel or channel is not a text channel.',
+                    content: 'Session expired. Please use /announce again.',
                     ephemeral: true
                 });
             }
 
-            // Check permissions
-            const botMember = interaction.guild.members.cache.get(client.user.id);
-            const permissions = channel.permissionsFor(botMember);
+            // Clean up
+            pendingAnnouncements.delete(interaction.user.id);
 
-            if (!permissions || !permissions.has('ViewChannel') || !permissions.has('SendMessages')) {
-                return interaction.reply({
-                    content: `Bot lacks permissions in ${channelOption}. Ensure it has View Channel and Send Messages.`,
-                    ephemeral: true
-                });
-            }
+            const title = interaction.fields.getTextInputValue('title');
+            const description = interaction.fields.getTextInputValue('description');
+            const color = interaction.fields.getTextInputValue('color');
+            const image = interaction.fields.getTextInputValue('image');
+            const footer = interaction.fields.getTextInputValue('footer');
 
-            // Build the embed
-            const embed = new EmbedBuilder()
-                .setTitle(title)
-                .setDescription(description)
-                .setTimestamp();
+            try {
+                const channel = await client.channels.fetch(pending.channelId);
 
-            // Parse color
-            if (color) {
-                const colorMap = {
-                    'red': 0xFF0000,
-                    'green': 0x00FF00,
-                    'blue': 0x0000FF,
-                    'yellow': 0xFFFF00,
-                    'orange': 0xFFA500,
-                    'purple': 0x800080,
-                    'pink': 0xFFC0CB,
-                    'gold': 0xFFD700,
-                    'white': 0xFFFFFF,
-                    'black': 0x000000
-                };
-                const colorLower = color.toLowerCase();
-                if (colorMap[colorLower]) {
-                    embed.setColor(colorMap[colorLower]);
-                } else if (color.startsWith('#')) {
-                    embed.setColor(parseInt(color.slice(1), 16));
-                } else {
-                    embed.setColor(0x5865F2); // Discord blurple default
+                if (!channel || !channel.isTextBased()) {
+                    return interaction.reply({
+                        content: 'Target channel is no longer valid.',
+                        ephemeral: true
+                    });
                 }
-            } else {
-                embed.setColor(0x5865F2);
+
+                // Build the embed
+                const embed = new EmbedBuilder()
+                    .setTitle(title)
+                    .setDescription(description)
+                    .setColor(parseColor(color))
+                    .setTimestamp();
+
+                if (image && image.trim()) {
+                    embed.setImage(image.trim());
+                }
+                if (footer && footer.trim()) {
+                    embed.setFooter({ text: footer.trim() });
+                }
+
+                await channel.send({ embeds: [embed] });
+                await interaction.reply({
+                    content: `Announcement sent to <#${pending.channelId}>`,
+                    ephemeral: true
+                });
+            } catch (error) {
+                console.error('Error sending announcement:', error.message);
+                await interaction.reply({
+                    content: `Failed to send announcement: ${error.message}`,
+                    ephemeral: true
+                });
             }
-
-            if (image) embed.setImage(image);
-            if (thumbnail) embed.setThumbnail(thumbnail);
-            if (footer) embed.setFooter({ text: footer });
-
-            // Send with optional plain message
-            const sendOptions = { embeds: [embed] };
-            if (plainMessage) {
-                sendOptions.content = plainMessage.replace(/\\n/g, '\n');
-            }
-
-            await channel.send(sendOptions);
-            await interaction.reply({
-                content: `Announcement sent to ${channelOption}`,
-                ephemeral: true
-            });
-        } catch (error) {
-            console.error('Error sending announcement:', error.message);
-            await interaction.reply({
-                content: `Failed to send announcement: ${error.message}`,
-                ephemeral: true
-            });
         }
     }
 });
+
+// Clean up old pending announcements every 5 minutes
+setInterval(() => {
+    const now = Date.now();
+    for (const [userId, data] of pendingAnnouncements) {
+        if (now - data.timestamp > 300000) { // 5 minutes
+            pendingAnnouncements.delete(userId);
+        }
+    }
+}, 300000);
 
 client.login(process.env.DISCORD_TOKEN);
