@@ -1,14 +1,22 @@
-const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ChannelType, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ChannelType, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, ActivityType } = require('discord.js');
 require('dotenv').config();
 
 // Allowed role IDs - users must have at least one of these roles to use the command
 const ALLOWED_ROLE_IDS = process.env.ALLOWED_ROLE_IDS?.split(',').map(id => id.trim()) || [];
 
+// Live role config - role assigned when a member is live with the keyword in their stream
+const LIVE_ROLE_ID = process.env.LIVE_ROLE_ID?.trim();
+const STREAM_KEYWORD = (process.env.STREAM_KEYWORD || 'RosalitaRP').trim();
+
 // Store pending announcements (channel selection before modal)
 const pendingAnnouncements = new Map();
 
 const client = new Client({
-    intents: [GatewayIntentBits.Guilds]
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildPresences
+    ]
 });
 
 // Register slash commands
@@ -72,6 +80,46 @@ function parseColor(color) {
     return 0x5865F2;
 }
 
+// Detect a streaming activity on Twitch/Kick/YouTube whose metadata contains the keyword
+function isQualifyingStreamActivity(activity) {
+    if (!activity) return false;
+    if (activity.type !== ActivityType.Streaming) return false;
+
+    const url = (activity.url || '').toLowerCase();
+    const onSupportedPlatform =
+        url.includes('twitch.tv') ||
+        url.includes('kick.com') ||
+        url.includes('youtube.com') ||
+        url.includes('youtu.be');
+    if (!onSupportedPlatform) return false;
+
+    const keyword = STREAM_KEYWORD.toLowerCase();
+    const haystack = [activity.name, activity.details, activity.state]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+    return haystack.includes(keyword);
+}
+
+async function syncLiveRole(member, activities) {
+    if (!LIVE_ROLE_ID || !member || member.user.bot) return;
+
+    const shouldHaveRole = (activities || []).some(isQualifyingStreamActivity);
+    const hasRole = member.roles.cache.has(LIVE_ROLE_ID);
+
+    try {
+        if (shouldHaveRole && !hasRole) {
+            await member.roles.add(LIVE_ROLE_ID, `Live on supported platform with "${STREAM_KEYWORD}" in stream`);
+            console.log(`Added Live role to ${member.user.tag}`);
+        } else if (!shouldHaveRole && hasRole) {
+            await member.roles.remove(LIVE_ROLE_ID, 'No longer live with required keyword');
+            console.log(`Removed Live role from ${member.user.tag}`);
+        }
+    } catch (error) {
+        console.error(`Failed to update Live role for ${member.user.tag}:`, error.message);
+    }
+}
+
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
 
@@ -87,6 +135,30 @@ client.once('ready', async () => {
     } catch (error) {
         console.error('Error registering commands:', error);
     }
+
+    // Initial sweep so we reconcile the Live role with current presences after a restart
+    if (LIVE_ROLE_ID) {
+        for (const guild of client.guilds.cache.values()) {
+            try {
+                await guild.members.fetch();
+                for (const member of guild.members.cache.values()) {
+                    const activities = member.presence?.activities || [];
+                    await syncLiveRole(member, activities);
+                }
+            } catch (error) {
+                console.error(`Initial Live role sweep failed for guild ${guild.id}:`, error.message);
+            }
+        }
+    } else {
+        console.warn('LIVE_ROLE_ID not configured - Live role auto-assignment is disabled.');
+    }
+});
+
+client.on('presenceUpdate', async (oldPresence, newPresence) => {
+    if (!LIVE_ROLE_ID) return;
+    const member = newPresence?.member || oldPresence?.member;
+    if (!member) return;
+    await syncLiveRole(member, newPresence?.activities || []);
 });
 
 client.on('interactionCreate', async interaction => {
